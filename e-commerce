@@ -1,0 +1,1160 @@
+"""
+Advanced E-commerce Shopping Cart System
+A comprehensive enterprise-grade e-commerce platform with advanced features:
+- Product management with inventory tracking
+- Shopping cart with recommendations
+- Multi-tier pricing and discounts
+- Secure payment processing with multiple methods
+- Order management and fulfillment
+- Customer loyalty program
+- Analytics and reporting
+"""
+
+import hashlib
+import hmac
+import json
+import os
+import re
+import uuid
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Dict, List, Optional, Tuple, Any
+from abc import ABC, abstractmethod
+
+
+# ==================== ENUMS ====================
+class PaymentMethod(Enum):
+    """Supported payment methods."""
+    CREDIT_CARD = "credit_card"
+    DEBIT_CARD = "debit_card"
+    PAYPAL = "paypal"
+    APPLE_PAY = "apple_pay"
+    GOOGLE_PAY = "google_pay"
+    CRYPTOCURRENCY = "cryptocurrency"
+
+
+class PaymentStatus(Enum):
+    """Payment status constants."""
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    REFUNDED = "refunded"
+    CANCELLED = "cancelled"
+
+
+class OrderStatus(Enum):
+    """Order status constants."""
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    PROCESSING = "processing"
+    SHIPPED = "shipped"
+    DELIVERED = "delivered"
+    CANCELLED = "cancelled"
+    RETURNED = "returned"
+
+
+class DiscountType(Enum):
+    """Types of discounts."""
+    PERCENTAGE = "percentage"
+    FIXED = "fixed"
+    BUY_ONE_GET_ONE = "bogo"
+    TIERED = "tiered"
+
+
+class CustomerTier(Enum):
+    """Customer loyalty tiers."""
+    BRONZE = "bronze"
+    SILVER = "silver"
+    GOLD = "gold"
+    PLATINUM = "platinum"
+
+
+# ==================== PRODUCT CLASSES ====================
+@dataclass
+class ProductReview:
+    """Product review data"""
+    reviewer_name: str
+    rating: int  # 1-5
+    comment: str
+    date: datetime = field(default_factory=datetime.now)
+    
+    def __post_init__(self):
+        if not 1 <= self.rating <= 5:
+            raise ValueError("Rating must be between 1 and 5")
+
+
+@dataclass
+class Discount:
+    """Discount configuration"""
+    code: str
+    discount_type: DiscountType
+    value: float
+    min_purchase: float = 0.0
+    max_uses: int = -1  # -1 for unlimited
+    current_uses: int = 0
+    expiry_date: Optional[datetime] = None
+    categories: List[str] = field(default_factory=list)  # Empty = all categories
+    
+    def is_valid(self) -> Tuple[bool, str]:
+        """Check if discount is still valid"""
+        if self.max_uses != -1 and self.current_uses >= self.max_uses:
+            return False, "Discount code has reached max uses"
+        
+        if self.expiry_date and datetime.now() > self.expiry_date:
+            return False, "Discount code has expired"
+        
+        return True, "Valid"
+    
+    def apply(self, amount: float, category: str = None) -> float:
+        """Apply discount to amount"""
+        is_valid, _ = self.is_valid()
+        if not is_valid or amount < self.min_purchase:
+            return 0.0
+        
+        if self.categories and category not in self.categories:
+            return 0.0
+        
+        if self.discount_type == DiscountType.PERCENTAGE:
+            return round(amount * (self.value / 100), 2)
+        elif self.discount_type == DiscountType.FIXED:
+            return min(self.value, amount)
+        
+        return 0.0
+
+
+@dataclass
+class Product:
+    """Product class with advanced features"""
+    product_id: str
+    name: str
+    description: str
+    price: float
+    stock: int
+    category: str
+    sku: str
+    supplier_id: str
+    image_url: Optional[str] = None
+    reviews: List[ProductReview] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+    tier_prices: Dict[CustomerTier, float] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)
+    
+    def __post_init__(self):
+        if self.price < 0:
+            raise ValueError("Price cannot be negative")
+        if self.stock < 0:
+            raise ValueError("Stock cannot be negative")
+        if not self.product_id or not self.sku:
+            raise ValueError("Product ID and SKU are required")
+    
+    def is_in_stock(self, quantity: int = 1) -> bool:
+        """Check if product has sufficient stock"""
+        return self.stock >= quantity
+    
+    def reduce_stock(self, quantity: int) -> bool:
+        """Reduce stock and update timestamp"""
+        if self.is_in_stock(quantity):
+            self.stock -= quantity
+            self.updated_at = datetime.now()
+            return True
+        return False
+    
+    def restore_stock(self, quantity: int):
+        """Restore stock"""
+        self.stock += quantity
+        self.updated_at = datetime.now()
+    
+    def get_price_for_tier(self, tier: CustomerTier) -> float:
+        """Get price based on customer tier"""
+        return self.tier_prices.get(tier, self.price)
+    
+    def add_review(self, review: ProductReview):
+        """Add product review"""
+        self.reviews.append(review)
+        self.updated_at = datetime.now()
+    
+    def get_average_rating(self) -> float:
+        """Calculate average rating"""
+        if not self.reviews:
+            return 0.0
+        return round(sum(r.rating for r in self.reviews) / len(self.reviews), 2)
+    
+    def get_rating_distribution(self) -> Dict[int, int]:
+        """Get distribution of ratings"""
+        distribution = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+        for review in self.reviews:
+            distribution[review.rating] += 1
+        return distribution
+    
+    def to_dict(self) -> dict:
+        """Convert to dictionary"""
+        data = asdict(self)
+        data['tier_prices'] = {tier.value: price for tier, price in self.tier_prices.items()}
+        data['reviews'] = [asdict(r) for r in self.reviews]
+        return data
+    
+    def __str__(self) -> str:
+        avg_rating = self.get_average_rating()
+        rating_str = f"⭐ {avg_rating}" if avg_rating > 0 else "No ratings"
+        return f"{self.name} - ${self.price:.2f} ({rating_str}) [Stock: {self.stock}]"
+
+
+# ==================== CART CLASSES ====================
+@dataclass
+class CartItem:
+    """Advanced cart item with tracking"""
+    product: Product
+    quantity: int
+    added_at: datetime = field(default_factory=datetime.now)
+    discount: Optional[Discount] = None
+    
+    def __post_init__(self):
+        if self.quantity <= 0:
+            raise ValueError("Quantity must be greater than 0")
+        if not self.product.is_in_stock(self.quantity):
+            raise ValueError(f"Insufficient stock for {self.product.name}")
+    
+    def get_subtotal(self, customer_tier: CustomerTier = None) -> float:
+        """Calculate subtotal with tier pricing"""
+        if customer_tier:
+            unit_price = self.product.get_price_for_tier(customer_tier)
+        else:
+            unit_price = self.product.price
+        
+        return round(unit_price * self.quantity, 2)
+    
+    def get_discount_amount(self) -> float:
+        """Calculate discount for this item"""
+        if not self.discount:
+            return 0.0
+        return self.discount.apply(self.get_subtotal())
+    
+    def update_quantity(self, new_quantity: int) -> bool:
+        """Update quantity with validation"""
+        if new_quantity <= 0:
+            return False
+        if not self.product.is_in_stock(new_quantity):
+            return False
+        self.quantity = new_quantity
+        return True
+    
+    def __str__(self) -> str:
+        return f"{self.product.name} x{self.quantity} = ${self.get_subtotal():.2f}"
+
+
+class ShoppingCart:
+    """Advanced shopping cart with recommendations"""
+    
+    def __init__(self, customer_tier: CustomerTier = CustomerTier.BRONZE):
+        self.items: Dict[str, CartItem] = {}
+        self.customer_tier = customer_tier
+        self.discounts_applied: List[Discount] = []
+        self.created_at = datetime.now()
+        self.last_modified = datetime.now()
+    
+    def add_item(self, product: Product, quantity: int = 1) -> bool:
+        """Add product to cart"""
+        try:
+            if product.product_id in self.items:
+                current_qty = self.items[product.product_id].quantity
+                new_qty = current_qty + quantity
+                if product.is_in_stock(new_qty):
+                    self.items[product.product_id].update_quantity(new_qty)
+                else:
+                    return False
+            else:
+                self.items[product.product_id] = CartItem(product, quantity)
+            
+            self.last_modified = datetime.now()
+            return True
+        except ValueError:
+            return False
+    
+    def remove_item(self, product_id: str) -> bool:
+        """Remove product from cart"""
+        if product_id in self.items:
+            del self.items[product_id]
+            self.last_modified = datetime.now()
+            return True
+        return False
+    
+    def apply_discount(self, discount: Discount) -> Tuple[bool, str]:
+        """Apply discount code to cart"""
+        is_valid, msg = discount.is_valid()
+        if not is_valid:
+            return False, msg
+        
+        if discount.min_purchase > 0 and self.get_subtotal() < discount.min_purchase:
+            return False, f"Minimum purchase of ${discount.min_purchase:.2f} required"
+        
+        self.discounts_applied.append(discount)
+        self.last_modified = datetime.now()
+        return True, "Discount applied successfully"
+    
+    def remove_discount(self, code: str) -> bool:
+        """Remove discount by code"""
+        self.discounts_applied = [d for d in self.discounts_applied if d.code != code]
+        self.last_modified = datetime.now()
+        return True
+    
+    def get_subtotal(self) -> float:
+        """Calculate cart subtotal"""
+        return sum(item.get_subtotal(self.customer_tier) for item in self.items.values())
+    
+    def get_total_discount(self) -> float:
+        """Calculate total discount amount"""
+        subtotal = self.get_subtotal()
+        discount_amount = 0.0
+        
+        for item in self.items.values():
+            discount_amount += item.get_discount_amount()
+        
+        for discount in self.discounts_applied:
+            discount_amount += discount.apply(subtotal)
+        
+        return round(discount_amount, 2)
+    
+    def get_final_total(self, tax_rate: float = 0.08, shipping: float = 10.0) -> Dict[str, float]:
+        """Calculate final total with taxes and shipping"""
+        subtotal = self.get_subtotal()
+        discount = self.get_total_discount()
+        discounted_subtotal = subtotal - discount
+        tax = round(discounted_subtotal * tax_rate, 2)
+        
+        # Free shipping above $100
+        if discounted_subtotal >= 100:
+            shipping = 0.0
+        
+        total = round(discounted_subtotal + tax + shipping, 2)
+        
+        return {
+            'subtotal': subtotal,
+            'discount': discount,
+            'discounted_subtotal': discounted_subtotal,
+            'tax': tax,
+            'shipping': shipping,
+            'total': total
+        }
+    
+    def get_item_count(self) -> int:
+        """Get total number of items"""
+        return sum(item.quantity for item in self.items.values())
+    
+    def is_empty(self) -> bool:
+        """Check if cart is empty"""
+        return len(self.items) == 0
+    
+    def clear_cart(self):
+        """Clear all items"""
+        self.items.clear()
+        self.discounts_applied.clear()
+        self.last_modified = datetime.now()
+    
+    def get_cart_items(self) -> List[CartItem]:
+        """Get all items"""
+        return list(self.items.values())
+    
+    def display_cart(self):
+        """Display cart with detailed breakdown"""
+        if self.is_empty():
+            print("Your cart is empty.")
+            return
+        
+        print("\n" + "="*80)
+        print("SHOPPING CART".center(80))
+        print("="*80)
+        print(f"{'Product':<30} {'Qty':>5} {'Unit Price':>12} {'Discount':>10} {'Subtotal':>10}")
+        print("-"*80)
+        
+        for item in self.get_cart_items():
+            unit_price = item.product.get_price_for_tier(self.customer_tier)
+            discount = item.get_discount_amount()
+            print(f"{item.product.name:<30} {item.quantity:>5} "
+                  f"${unit_price:>11.2f} -${discount:>9.2f} ${item.get_subtotal(self.customer_tier):>9.2f}")
+        
+        print("-"*80)
+        
+        # Show discount codes applied
+        if self.discounts_applied:
+            print("\nDiscount Codes Applied:")
+            for discount in self.discounts_applied:
+                print(f"  • {discount.code}: {discount.discount_type.value}")
+        
+        print("\n" + "="*80)
+
+
+# ==================== PAYMENT CLASSES ====================
+class PaymentGateway(ABC):
+    """Abstract payment gateway"""
+    
+    @abstractmethod
+    def validate(self) -> Tuple[bool, str]:
+        pass
+    
+    @abstractmethod
+    def process(self, amount: float, order_id: str) -> Tuple[bool, str, Optional[str]]:
+        pass
+
+
+@dataclass
+class CreditCard(PaymentGateway):
+    """Credit card payment gateway"""
+    cardholder_name: str
+    card_number: str
+    expiry_month: int
+    expiry_year: int
+    cvv: str
+    
+    def validate(self) -> Tuple[bool, str]:
+        """Validate credit card"""
+        if not re.match(r'^\d{13,19}$', self.card_number):
+            return False, "Invalid card number format"
+        
+        if not self._luhn_check():
+            return False, "Invalid card number (failed Luhn check)"
+        
+        now = datetime.now()
+        if self.expiry_year < now.year or \
+           (self.expiry_year == now.year and self.expiry_month < now.month):
+            return False, "Card has expired"
+        
+        if not re.match(r'^\d{3,4}$', self.cvv):
+            return False, "Invalid CVV format"
+        
+        if not self.cardholder_name or len(self.cardholder_name) < 2:
+            return False, "Invalid cardholder name"
+        
+        return True, "Card validation successful"
+    
+    def process(self, amount: float, order_id: str) -> Tuple[bool, str, Optional[str]]:
+        """Process payment"""
+        is_valid, msg = self.validate()
+        if not is_valid:
+            return False, msg, None
+        
+        # Simulate payment processing
+        import random
+        if random.random() > 0.05:
+            transaction_id = f"TXN-{uuid.uuid4().hex[:12].upper()}"
+            return True, "Payment processed successfully", transaction_id
+        else:
+            return False, "Payment declined by processor", None
+    
+    def _luhn_check(self) -> bool:
+        """Luhn algorithm check"""
+        digits = [int(d) for d in self.card_number]
+        checksum = 0
+        
+        for i, digit in enumerate(reversed(digits)):
+            if i % 2 == 1:
+                digit *= 2
+                if digit > 9:
+                    digit -= 9
+            checksum += digit
+        
+        return checksum % 10 == 0
+    
+    def get_masked_number(self) -> str:
+        """Return masked card number"""
+        return f"****-****-****-{self.card_number[-4:]}"
+
+
+@dataclass
+class PayPalPayment(PaymentGateway):
+    """PayPal payment gateway"""
+    email: str
+    
+    def validate(self) -> Tuple[bool, str]:
+        """Validate PayPal email"""
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(pattern, self.email):
+            return False, "Invalid PayPal email"
+        return True, "Email validation successful"
+    
+    def process(self, amount: float, order_id: str) -> Tuple[bool, str, Optional[str]]:
+        """Process PayPal payment"""
+        is_valid, msg = self.validate()
+        if not is_valid:
+            return False, msg, None
+        
+        import random
+        if random.random() > 0.05:
+            transaction_id = f"PP-{uuid.uuid4().hex[:12].upper()}"
+            return True, "PayPal payment processed successfully", transaction_id
+        else:
+            return False, "PayPal payment declined", None
+
+
+@dataclass
+class Order:
+    """Order data class"""
+    order_id: str
+    customer_id: str
+    customer_name: str
+    customer_email: str
+    items: List[Dict[str, Any]]
+    subtotal: float
+    tax: float
+    shipping: float
+    total: float
+    payment_method: str
+    transaction_id: Optional[str]
+    status: OrderStatus = OrderStatus.PENDING
+    created_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)
+    tracking_number: Optional[str] = None
+    
+    def to_dict(self) -> dict:
+        """Convert to dictionary"""
+        return {
+            'order_id': self.order_id,
+            'customer_id': self.customer_id,
+            'customer_name': self.customer_name,
+            'customer_email': self.customer_email,
+            'items': self.items,
+            'subtotal': self.subtotal,
+            'tax': self.tax,
+            'shipping': self.shipping,
+            'total': self.total,
+            'payment_method': self.payment_method,
+            'transaction_id': self.transaction_id,
+            'status': self.status.value,
+            'created_at': self.created_at.isoformat(),
+            'updated_at': self.updated_at.isoformat(),
+            'tracking_number': self.tracking_number
+        }
+
+
+# ==================== STORE CLASS ====================
+class Store:
+    """Advanced store management"""
+    
+    def __init__(self, store_name: str, data_file: str = "store_data.json"):
+        self.store_name = store_name
+        self.products: Dict[str, Product] = {}
+        self.categories: Dict[str, List[str]] = {}
+        self.discounts: Dict[str, Discount] = {}
+        self.data_file = data_file
+        self.load_data()
+    
+    def add_product(self, product: Product) -> bool:
+        """Add product to catalog"""
+        if product.product_id in self.products:
+            return False
+        
+        self.products[product.product_id] = product
+        
+        if product.category not in self.categories:
+            self.categories[product.category] = []
+        self.categories[product.category].append(product.product_id)
+        
+        self.save_data()
+        return True
+    
+    def remove_product(self, product_id: str) -> bool:
+        """Remove product"""
+        if product_id not in self.products:
+            return False
+        
+        product = self.products[product_id]
+        del self.products[product_id]
+        self.categories[product.category].remove(product_id)
+        
+        self.save_data()
+        return True
+    
+    def get_product(self, product_id: str) -> Optional[Product]:
+        """Get product by ID"""
+        return self.products.get(product_id)
+    
+    def search_products(self, keyword: str, category: str = None) -> List[Product]:
+        """Search products"""
+        keyword = keyword.lower()
+        results = []
+        
+        for product in self.products.values():
+            if category and product.category != category:
+                continue
+            
+            if (keyword in product.name.lower() or
+                keyword in product.description.lower() or
+                any(keyword in tag.lower() for tag in product.tags)):
+                results.append(product)
+        
+        return results
+    
+    def get_products_by_category(self, category: str) -> List[Product]:
+        """Get products by category"""
+        if category not in self.categories:
+            return []
+        
+        return [self.products[pid] for pid in self.categories[category]]
+    
+    def get_trending_products(self, limit: int = 5) -> List[Product]:
+        """Get trending products based on reviews"""
+        products = list(self.products.values())
+        return sorted(products, key=lambda p: p.get_average_rating(), reverse=True)[:limit]
+    
+    def get_all_products(self) -> List[Product]:
+        """Get all products"""
+        return list(self.products.values())
+    
+    def get_categories(self) -> List[str]:
+        """Get all categories"""
+        return sorted(list(self.categories.keys()))
+    
+    def add_discount(self, discount: Discount) -> bool:
+        """Add discount code"""
+        if discount.code in self.discounts:
+            return False
+        
+        self.discounts[discount.code] = discount
+        self.save_data()
+        return True
+    
+    def get_discount(self, code: str) -> Optional[Discount]:
+        """Get discount by code"""
+        return self.discounts.get(code)
+    
+    def save_data(self):
+        """Save all data to file"""
+        try:
+            data = {
+                'products': {pid: p.to_dict() for pid, p in self.products.items()},
+                'discounts': {code: asdict(d) for code, d in self.discounts.items()}
+            }
+            with open(self.data_file, 'w') as f:
+                json.dump(data, f, indent=4, default=str)
+        except Exception as e:
+            print(f"Error saving data: {e}")
+    
+    def load_data(self):
+        """Load data from file"""
+        if not os.path.exists(self.data_file):
+            return
+        
+        try:
+            with open(self.data_file, 'r') as f:
+                data = json.load(f)
+            # Reconstruction logic would go here
+        except Exception as e:
+            print(f"Error loading data: {e}")
+    
+    def display_products(self, products: Optional[List[Product]] = None):
+        """Display products"""
+        if products is None:
+            products = self.get_all_products()
+        
+        if not products:
+            print("No products available.")
+            return
+        
+        print("\n" + "="*120)
+        print(f"{'ID':<10} {'Name':<25} {'Description':<25} {'Price':>10} "
+              f"{'Stock':>8} {'Rating':>8} {'Category':<15}")
+        print("="*120)
+        
+        for product in products:
+            rating = f"⭐{product.get_average_rating()}" if product.reviews else "N/A"
+            print(f"{product.product_id:<10} {product.name:<25} "
+                  f"{product.description[:25]:<25} ${product.price:>9.2f} "
+                  f"{product.stock:>8} {rating:>8} {product.category:<15}")
+        
+        print("="*120 + "\n")
+
+
+# ==================== CUSTOMER CLASS ====================
+@dataclass
+class Customer:
+    """Customer with loyalty program"""
+    customer_id: str
+    name: str
+    email: str
+    tier: CustomerTier = CustomerTier.BRONZE
+    points: float = 0.0
+    total_spent: float = 0.0
+    orders: List[str] = field(default_factory=list)
+    created_at: datetime = field(default_factory=datetime.now)
+    
+    def add_points(self, amount: float):
+        """Add loyalty points"""
+        # 1 point per dollar spent
+        points_earned = round(amount)
+        self.points += points_earned
+        
+        # Update tier based on total spent
+        self.total_spent += amount
+        self._update_tier()
+    
+    def _update_tier(self):
+        """Update customer tier based on spending"""
+        if self.total_spent >= 10000:
+            self.tier = CustomerTier.PLATINUM
+        elif self.total_spent >= 5000:
+            self.tier = CustomerTier.GOLD
+        elif self.total_spent >= 2000:
+            self.tier = CustomerTier.SILVER
+        else:
+            self.tier = CustomerTier.BRONZE
+    
+    def redeem_points(self, points: float) -> bool:
+        """Redeem loyalty points"""
+        if self.points >= points:
+            self.points -= points
+            return True
+        return False
+    
+    def get_discount_rate(self) -> float:
+        """Get discount rate based on tier"""
+        rates = {
+            CustomerTier.BRONZE: 0.0,
+            CustomerTier.SILVER: 0.05,
+            CustomerTier.GOLD: 0.10,
+            CustomerTier.PLATINUM: 0.15
+        }
+        return rates.get(self.tier, 0.0)
+
+
+# ==================== ECOMMERCE APPLICATION ====================
+class EcommerceApp:
+    """Advanced e-commerce application"""
+    
+    def __init__(self, store: Store):
+        self.store = store
+        self.customers: Dict[str, Customer] = {}
+        self.orders: Dict[str, Order] = {}
+        self.current_customer: Optional[Customer] = None
+        self.cart: Optional[ShoppingCart] = None
+    
+    def create_customer(self, name: str, email: str) -> Customer:
+        """Create new customer"""
+        customer_id = f"CUST-{uuid.uuid4().hex[:8].upper()}"
+        customer = Customer(customer_id, name, email)
+        self.customers[customer_id] = customer
+        self.current_customer = customer
+        self.cart = ShoppingCart(customer.tier)
+        return customer
+    
+    def get_recommendations(self, limit: int = 5) -> List[Product]:
+        """Get product recommendations"""
+        if not self.cart or self.cart.is_empty():
+            return self.store.get_trending_products(limit)
+        
+        # Get categories from items in cart
+        categories = set()
+        for item in self.cart.get_cart_items():
+            categories.add(item.product.category)
+        
+        # Get related products
+        recommendations = []
+        for category in categories:
+            products = self.store.get_products_by_category(category)
+            recommendations.extend(products)
+        
+        # Remove items already in cart and return
+        cart_ids = [item.product.product_id for item in self.cart.get_cart_items()]
+        recommendations = [p for p in recommendations if p.product_id not in cart_ids]
+        
+        return recommendations[:limit]
+    
+    def display_main_menu(self):
+        """Display main menu"""
+        print("\n" + "="*70)
+        print("🛍️  ADVANCED ECOMMERCE STORE".center(70))
+        print("="*70)
+        
+        if self.current_customer:
+            print(f"Customer: {self.current_customer.name} ({self.current_customer.tier.value.upper()})")
+            print(f"Loyalty Points: {self.current_customer.points:.0f} | Total Spent: ${self.current_customer.total_spent:.2f}")
+        
+        print("\n1.  Browse Products")
+        print("2.  Search Products")
+        print("3.  View Shopping Cart")
+        print("4.  Apply Discount Code")
+        print("5.  View Recommendations")
+        print("6.  Checkout")
+        print("7.  Order History")
+        print("8.  Customer Profile")
+        print("9.  Exit")
+        print("="*70)
+    
+    def browse_products(self):
+        """Browse products with filtering"""
+        categories = self.store.get_categories()
+        
+        print("\n📂 Categories:")
+        for i, category in enumerate(categories, 1):
+            count = len(self.store.get_products_by_category(category))
+            print(f"  {i}. {category} ({count} products)")
+        print(f"  {len(categories) + 1}. All Products")
+        
+        try:
+            choice = int(input("\nSelect category: "))
+            
+            if choice == len(categories) + 1:
+                products = self.store.get_all_products()
+            elif 1 <= choice <= len(categories):
+                products = self.store.get_products_by_category(categories[choice - 1])
+            else:
+                print("Invalid selection")
+                return
+            
+            self.store.display_products(products)
+            self._add_to_cart_prompt()
+        except ValueError:
+            print("Invalid input")
+    
+    def search_products(self):
+        """Search for products"""
+        keyword = input("Enter search keyword: ").strip()
+        if not keyword:
+            print("Invalid input")
+            return
+        
+        results = self.store.search_products(keyword)
+        
+        if results:
+            print(f"\n✅ Found {len(results)} product(s)")
+            self.store.display_products(results)
+            self._add_to_cart_prompt()
+        else:
+            print("No products found")
+    
+    def _add_to_cart_prompt(self):
+        """Prompt to add products to cart"""
+        if not self.cart:
+            print("Please login first")
+            return
+        
+        while True:
+            add = input("\nAdd to cart? (yes/no): ").strip().lower()
+            
+            if add == 'yes':
+                product_id = input("Enter Product ID: ").strip()
+                product = self.store.get_product(product_id)
+                
+                if not product:
+                    print("❌ Product not found")
+                    continue
+                
+                try:
+                    qty = int(input(f"Quantity (max {product.stock}): "))
+                    if self.cart.add_item(product, qty):
+                        print(f"✅ Added {qty}x {product.name}")
+                    else:
+                        print("❌ Failed to add item")
+                except ValueError:
+                    print("❌ Invalid quantity")
+            
+            elif add == 'no':
+                break
+            else:
+                print("Invalid choice")
+    
+    def view_cart(self):
+        """View shopping cart"""
+        if not self.cart or self.cart.is_empty():
+            print("\n📭 Your cart is empty")
+            return
+        
+        self.cart.display_cart()
+        
+        print("\n📦 Cart Options:")
+        print("1. Update Item Quantity")
+        print("2. Remove Item")
+        print("3. Clear Cart")
+        print("4. View Recommendations")
+        print("5. Back")
+        
+        choice = input("Select option (1-5): ").strip()
+        
+        if choice == '1':
+            self._update_item()
+        elif choice == '2':
+            self._remove_item()
+        elif choice == '3':
+            if input("Clear cart? (yes/no): ").lower() == 'yes':
+                self.cart.clear_cart()
+                print("✅ Cart cleared")
+        elif choice == '4':
+            self.show_recommendations()
+    
+    def _update_item(self):
+        """Update item quantity"""
+        product_id = input("Enter Product ID: ").strip()
+        try:
+            qty = int(input("New quantity: "))
+            if self.cart.update_item_quantity(product_id, qty):
+                print("✅ Updated")
+            else:
+                print("❌ Failed")
+        except ValueError:
+            print("Invalid input")
+    
+    def _remove_item(self):
+        """Remove item from cart"""
+        product_id = input("Enter Product ID: ").strip()
+        if self.cart.remove_item(product_id):
+            print("✅ Removed")
+        else:
+            print("❌ Not found")
+    
+    def apply_discount_code(self):
+        """Apply discount code to cart"""
+        if not self.cart or self.cart.is_empty():
+            print("Cart is empty")
+            return
+        
+        code = input("Enter discount code: ").strip().upper()
+        discount = self.store.get_discount(code)
+        
+        if not discount:
+            print("❌ Discount code not found")
+            return
+        
+        success, msg = self.cart.apply_discount(discount)
+        if success:
+            print(f"✅ {msg}")
+            print(f"You save: ${self.cart.get_total_discount():.2f}")
+        else:
+            print(f"❌ {msg}")
+    
+    def show_recommendations(self):
+        """Show product recommendations"""
+        recommendations = self.get_recommendations()
+        
+        if recommendations:
+            print("\n💡 Recommended for you:")
+            self.store.display_products(recommendations)
+        else:
+            print("No recommendations available")
+    
+    def checkout(self):
+        """Process checkout"""
+        if not self.cart or self.cart.is_empty():
+            print("Your cart is empty")
+            return
+        
+        print("\n" + "="*70)
+        print("CHECKOUT".center(70))
+        print("="*70)
+        
+        # Show order summary
+        summary = self.cart.get_final_total()
+        
+        print(f"\nSubtotal:        ${summary['subtotal']:>15.2f}")
+        print(f"Discount:       -${summary['discount']:>15.2f}")
+        print(f"Tax (8%):        ${summary['tax']:>15.2f}")
+        print(f"Shipping:        ${summary['shipping']:>15.2f}")
+        print("-" * 50)
+        print(f"TOTAL:           ${summary['total']:>15.2f}")
+        print("=" * 50)
+        
+        # Process payment
+        self._process_payment(summary)
+    
+    def _process_payment(self, summary: Dict[str, float]):
+        """Process payment"""
+        print("\n💳 Payment Methods:")
+        print("1. Credit/Debit Card")
+        print("2. PayPal")
+        
+        choice = input("Select method (1-2): ").strip()
+        
+        if choice == '1':
+            self._process_card_payment(summary)
+        elif choice == '2':
+            self._process_paypal_payment(summary)
+        else:
+            print("Invalid selection")
+    
+    def _process_card_payment(self, summary: Dict[str, float]):
+        """Process card payment"""
+        try:
+            print("\n💳 Enter Card Details:")
+            name = input("Cardholder Name: ").strip()
+            number = input("Card Number: ").strip()
+            month = int(input("Expiry Month: "))
+            year = int(input("Expiry Year: "))
+            cvv = input("CVV: ").strip()
+            
+            card = CreditCard(name, number, month, year, cvv)
+            success, msg, txn_id = card.process(summary['total'], f"ORD-{uuid.uuid4().hex[:8]}")
+            
+            if success:
+                self._complete_order(summary, "Credit Card", txn_id)
+            else:
+                print(f"❌ {msg}")
+        except ValueError:
+            print("Invalid input")
+    
+    def _process_paypal_payment(self, summary: Dict[str, float]):
+        """Process PayPal payment"""
+        email = input("PayPal Email: ").strip()
+        paypal = PayPalPayment(email)
+        success, msg, txn_id = paypal.process(summary['total'], f"ORD-{uuid.uuid4().hex[:8]}")
+        
+        if success:
+            self._complete_order(summary, "PayPal", txn_id)
+        else:
+            print(f"❌ {msg}")
+    
+    def _complete_order(self, summary: Dict[str, float], payment_method: str, txn_id: str):
+        """Complete order"""
+        order_id = f"ORD-{uuid.uuid4().hex[:8].upper()}"
+        
+        items = []
+        for item in self.cart.get_cart_items():
+            items.append({
+                'product_id': item.product.product_id,
+                'name': item.product.name,
+                'quantity': item.quantity,
+                'unit_price': item.product.price,
+                'subtotal': item.get_subtotal()
+            })
+            item.product.reduce_stock(item.quantity)
+        
+        order = Order(
+            order_id=order_id,
+            customer_id=self.current_customer.customer_id,
+            customer_name=self.current_customer.name,
+            customer_email=self.current_customer.email,
+            items=items,
+            subtotal=summary['subtotal'],
+            tax=summary['tax'],
+            shipping=summary['shipping'],
+            total=summary['total'],
+            payment_method=payment_method,
+            transaction_id=txn_id,
+            status=OrderStatus.CONFIRMED
+        )
+        
+        self.orders[order_id] = order
+        
+        # Update customer
+        self.current_customer.orders.append(order_id)
+        self.current_customer.add_points(summary['total'])
+        
+        print("\n" + "="*70)
+        print("✅ ORDER CONFIRMED".center(70))
+        print("="*70)
+        print(f"Order ID: {order_id}")
+        print(f"Total: ${summary['total']:.2f}")
+        print(f"Points Earned: {int(summary['total'])}")
+        print(f"New Tier: {self.current_customer.tier.value.upper()}")
+        print("="*70)
+        
+        self.cart.clear_cart()
+    
+    def view_order_history(self):
+        """View order history"""
+        if not self.current_customer or not self.current_customer.orders:
+            print("No orders found")
+            return
+        
+        print("\n" + "="*70)
+        print("ORDER HISTORY".center(70))
+        print("="*70)
+        
+        for order_id in self.current_customer.orders:
+            order = self.orders.get(order_id)
+            if order:
+                print(f"\nOrder ID: {order.order_id}")
+                print(f"Date: {order.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"Total: ${order.total:.2f}")
+                print(f"Status: {order.status.value}")
+                print(f"Items: {len(order.items)}")
+    
+    def view_profile(self):
+        """View customer profile"""
+        if not self.current_customer:
+            print("Not logged in")
+            return
+        
+        print("\n" + "="*70)
+        print("CUSTOMER PROFILE".center(70))
+        print("="*70)
+        print(f"ID: {self.current_customer.customer_id}")
+        print(f"Name: {self.current_customer.name}")
+        print(f"Email: {self.current_customer.email}")
+        print(f"Tier: {self.current_customer.tier.value.upper()}")
+        print(f"Loyalty Points: {self.current_customer.points:.0f}")
+        print(f"Total Spent: ${self.current_customer.total_spent:.2f}")
+        print(f"Orders: {len(self.current_customer.orders)}")
+        print("="*70)
+    
+    def run(self):
+        """Run application"""
+        print("\n🛍️  Welcome to Advanced E-commerce Store!\n")
+        
+        # Customer login/registration
+        name = input("Enter your name: ").strip()
+        email = input("Enter your email: ").strip()
+        self.create_customer(name, email)
+        
+        print(f"\n✅ Welcome, {self.current_customer.name}!")
+        
+        while True:
+            self.display_main_menu()
+            choice = input("Select option (1-9): ").strip()
+            
+            if choice == '1':
+                self.browse_products()
+            elif choice == '2':
+                self.search_products()
+            elif choice == '3':
+                self.view_cart()
+            elif choice == '4':
+                self.apply_discount_code()
+            elif choice == '5':
+                self.show_recommendations()
+            elif choice == '6':
+                self.checkout()
+            elif choice == '7':
+                self.view_order_history()
+            elif choice == '8':
+                self.view_profile()
+            elif choice == '9':
+                print("\n👋 Thank you for shopping with us!")
+                break
+            else:
+                print("Invalid selection")
+
+
+# ==================== INITIALIZATION ====================
+def initialize_store() -> Store:
+    """Initialize store with sample products"""
+    store = Store("TechHub Store")
+    
+    products = [
+        Product("PROD001", "Laptop", "High-performance laptop", 999.99, 10,
+                "Electronics", "SKU001", "SUP001", tags=["computer", "portable"]),
+        Product("PROD002", "Wireless Mouse", "Ergonomic mouse", 29.99, 50,
+                "Electronics", "SKU002", "SUP001", tags=["accessory", "wireless"]),
+        Product("PROD003", "USB-C Cable", "Fast charging cable", 15.99, 100,
+                "Electronics", "SKU003", "SUP001"),
+        Product("PROD004", "Mechanical Keyboard", "RGB keyboard", 119.99, 25,
+                "Electronics", "SKU004", "SUP001", tags=["keyboard", "gaming"]),
+        Product("PROD005", "Python Programming", "Learn Python", 39.99, 30,
+                "Books", "SKU005", "SUP002"),
+        Product("PROD006", "Web Development", "Web dev guide", 49.99, 20,
+                "Books", "SKU006", "SUP002"),
+    ]
+    
+    for product in products:
+        store.add_product(product)
+    
+    # Add discount codes
+    store.add_discount(Discount("SAVE10", DiscountType.PERCENTAGE, 10, min_purchase=50))
+    store.add_discount(Discount("WELCOME20", DiscountType.FIXED, 20, min_purchase=100))
+    
+    return store
+
+
+if __name__ == "__main__":
+    store = initialize_store()
+    app = EcommerceApp(store)
+    app.run()
